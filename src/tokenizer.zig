@@ -14,6 +14,7 @@ pub const Token = struct {
         text,
         arg, // argument of head,link,etc terminated by crlf
         head,
+        list_item,
         link,
         quote,
         preformat_toggle,
@@ -29,6 +30,7 @@ pub const Token = struct {
                 .head => "#",
                 .link => "=>",
                 .quote => ">",
+                .list_item => "*",
                 .preformat_toggle => "```",
             };
         }
@@ -48,9 +50,26 @@ pub const Token = struct {
 pub const Tokenizer = struct {
     buffer: [:0]const u8,
     index: usize,
-    preformat_toggle_mode: bool,
-    new_line: bool,
+    state: State,
+    //preformat_toggle_mode: bool,
+    //new_line: bool,
 
+    pub const State = enum {
+        new_line,
+        arg,
+        bt1, // `
+        bt2, // ``
+        ln1, // =
+        h1, // #
+        h2, // ##
+        li1, // *
+        text,
+        pf_new_line,
+        pf_arg,
+        pf_bt1,
+        pf_bt2,
+        pf_text,
+    };
     /// For debugging purposes
     pub fn dump(self: *Tokenizer, token: *const Token) void {
         std.debug.print("{s} \"{s}\"\n", .{ @tagName(token.tag), self.buffer[token.loc.start..token.loc.end] });
@@ -62,25 +81,14 @@ pub const Tokenizer = struct {
         return Tokenizer{
             .buffer = buffer,
             .index = src_start,
-            .preformat_toggle_mode = false,
-            .new_line = true,
+            .state = .new_line,
+            //.preformat_toggle_mode = false,
+            //.new_line = true,
         };
     }
 
-    const State = enum {
-        start,
-        space,
-        bt1, // `
-        bt2, // ``
-        ln1, // =
-        h1, // #
-        h2, // ##
-        text,
-        arg,
-    };
-
     pub fn next(self: *Tokenizer) Token {
-        var state: State = .start;
+        //var state: State = .start;
         var result = Token{
             .tag = .eof,
             .loc = .{
@@ -99,176 +107,194 @@ pub const Tokenizer = struct {
                     result.loc.end = self.index;
                 } else {
                     result.tag =
-                        switch (state) {
-                        .start => .eof,
-                        .space => .eof,
-                        .bt1 => .text,
-                        .bt2 => .text,
-                        .ln1 => .text,
-                        .h1 => .head,
-                        .h2 => .head,
-                        .text => .text,
-                        .arg => .arg,
+                        switch (self.state) {
+                        .new_line, .pf_new_line => .eof,
+                        .bt1, .bt2, .pf_bt1, .pf_bt2, .ln1, .li1, .text, .pf_text => .text,
+                        .h1, .h2 => .head,
+                        .arg, .pf_arg => .arg,
                     };
+                    self.state = .new_line; // the next read should get eof
                     result.loc.end = self.index;
                 }
                 return result;
             }
-            switch (state) {
-                .start => {
-                    if (self.new_line) {
-                        // we start on a new line
-                        if (self.preformat_toggle_mode) {
-                            if (c == '`') {
-                                state = .bt1;
-                            } else {
-                                state = .text;
-                            }
-                        } else {
-                            // normal mode
-                            switch (c) {
-                                '#' => {
-                                    state = .h1;
-                                },
-                                '=' => {
-                                    state = .ln1;
-                                },
-                                '>' => {
-                                    result.tag = .quote;
-                                    self.new_line = false;
-                                    break;
-                                },
-                                '`' => {
-                                    state = .bt1;
-                                },
-                                '\n' => {
-                                    result.tag = .text;
-                                    exclude_char = true;
-                                    break;
-                                },
-                                else => {
-                                    state = .text;
-                                },
-                            }
-                        }
-                    } else {
-                        // we start not on a new line
-                        switch (c) {
-                            ' ', '\t' => {
-                                state = .space;
-                            },
-                            '\n' => {
-                                // state stays at .start;
-                                self.new_line = true;
-                            },
-                            else => {
-                                state = .arg;
-                            },
-                        }
-                    }
-                },
-                .space => switch (c) {
-                    // we are looking for arguments
-                    ' ', '\t' => {},
-                    '\n' => {
-                        state = .start;
-                        self.new_line = true;
+            switch (self.state) {
+                .new_line => switch (c) {
+                    '#' => {
+                        self.state = .h1;
                     },
-                    else => {
-                        result.loc.start = self.index;
-                        state = .arg;
+                    '=' => {
+                        self.state = .ln1;
                     },
-                },
-                .bt1 => switch (c) {
+                    '>' => {
+                        result.tag = .quote;
+                        self.state = .arg;
+                        break;
+                    },
+                    '*' => {
+                        self.state = .li1;
+                    },
                     '`' => {
-                        state = .bt2;
+                        self.state = .bt1;
                     },
                     '\n' => {
                         result.tag = .text;
-                        self.new_line = true;
                         exclude_char = true;
                         break;
                     },
                     else => {
-                        state = .text;
+                        self.state = .text;
+                    },
+                },
+                .arg => switch (c) {
+                    '\n' => {
+                        result.tag = .arg;
+                        self.state = .new_line;
+                        exclude_char = true;
+                        break;
+                    },
+                    else => {},
+                },
+                .bt1 => switch (c) {
+                    '`' => {
+                        self.state = .bt2;
+                    },
+                    '\n' => {
+                        result.tag = .text;
+                        self.state = .new_line;
+                        exclude_char = true;
+                        break;
+                    },
+                    else => {
+                        self.state = .text;
                     },
                 },
                 .bt2 => switch (c) {
                     '`' => {
                         result.tag = .preformat_toggle;
-                        self.new_line = false;
+                        self.state = .pf_arg;
                         break;
                     },
                     '\n' => {
                         result.tag = .text;
-                        self.new_line = true;
+                        self.state = .new_line;
                         exclude_char = true;
                         break;
                     },
                     else => {
-                        state = .text;
+                        self.state = .text;
                     },
                 },
-                .ln1 => switch (c) {
-                    '>' => {
-                        result.tag = .link;
-                        self.new_line = false;
-                        break;
-                    },
-                    '\n' => {
-                        result.tag = .text;
-                        self.new_line = true;
-                        exclude_char = true;
-
+                .li1 => switch (c) {
+                    ' ' => {
+                        result.tag = .list_item;
+                        self.state = .arg;
                         break;
                     },
                     else => {
-                        state = .text;
+                        self.state = .text;
                     },
                 },
                 .h1 => switch (c) {
                     '#' => {
-                        state = .h2;
+                        self.state = .h2;
                     },
                     else => {
                         result.tag = .head;
                         self.index -= 1; // reread char
-                        self.new_line = false;
+                        self.state = .arg;
                         break;
                     },
                 },
                 .h2 => switch (c) {
                     '#' => {
                         result.tag = .head;
-                        self.new_line = false;
+                        self.state = .arg;
                         break;
                     },
                     else => {
                         result.tag = .head;
                         self.index -= 1; // reread char
-                        self.new_line = false;
+                        self.state = .arg;
                         break;
+                    },
+                },
+                .ln1 => switch (c) {
+                    '>' => {
+                        result.tag = .link;
+                        self.state = .arg;
+                        break;
+                    },
+                    '\n' => {
+                        result.tag = .text;
+                        self.state = .new_line;
+                        exclude_char = true;
+                        break;
+                    },
+                    else => {
+                        self.state = .text;
                     },
                 },
                 .text => switch (c) {
                     '\n' => {
                         result.tag = .text;
-                        self.new_line = true;
+                        self.state = .new_line;
                         exclude_char = true;
                         break;
                     },
                     else => {},
                 },
-                .arg => switch (c) {
+                .pf_new_line => switch (c) {
+                    '`' => {
+                        self.state = .bt1;
+                    },
+                    else => {
+                        self.state = .pf_text;
+                    },
+                },
+                .pf_bt1 => switch (c) {
+                    '`' => {
+                        self.state = .pf_bt2;
+                    },
                     '\n' => {
-                        result.tag = .arg;
-                        self.new_line = true;
+                        result.tag = .text;
+                        self.state = .pf_new_line;
                         exclude_char = true;
                         break;
                     },
-                    ' ', '\t' => {
+                    else => {
+                        self.state = .pf_text;
+                    },
+                },
+                .pf_bt2 => switch (c) {
+                    '`' => {
+                        result.tag = .preformat_toggle;
+                        self.state = .arg;
+                        break;
+                    },
+                    '\n' => {
+                        result.tag = .text;
+                        self.state = .pf_new_line;
+                        exclude_char = true;
+                        break;
+                    },
+                    else => {
+                        self.state = .pf_text;
+                    },
+                },
+                .pf_arg => switch (c) {
+                    '\n' => {
                         result.tag = .arg;
-                        self.new_line = false;
+                        self.state = .pf_new_line;
+                        exclude_char = true;
+                        break;
+                    },
+                    else => {},
+                },
+                .pf_text => switch (c) {
+                    '\n' => {
+                        result.tag = .text;
+                        self.state = .pf_new_line;
                         exclude_char = true;
                         break;
                     },
@@ -341,133 +367,84 @@ pub const Tokenizer = struct {
             self.index += length - 1;
             return 0;
         }
+        //return 0;
     }
 };
 
 test "Text" {
     try testTokenize("Text", &.{
-        .{ .tag = .text, .loc = .{
-            .start = 0,
-            .end = 4,
-        } },
+        .{ .tag = .text, .loc = .{ .start = 0, .end = 4 } },
     });
 }
 
 test "TextText" {
     try testTokenize("abc\ndef", &.{
-        .{ .tag = .text, .loc = .{
-            .start = 0,
-            .end = 3,
-        } },
-        .{ .tag = .text, .loc = .{
-            .start = 4,
-            .end = 7,
-        } },
+        .{ .tag = .text, .loc = .{ .start = 0, .end = 3 } },
+        .{ .tag = .text, .loc = .{ .start = 4, .end = 7 } },
     });
 }
 
 test ">Quote" {
     try testTokenize(">Quote", &.{
-        .{ .tag = .quote, .loc = .{
-            .start = 0,
-            .end = 1,
-        } },
-        .{ .tag = .arg, .loc = .{
-            .start = 1,
-            .end = 6,
-        } },
+        .{ .tag = .quote, .loc = .{ .start = 0, .end = 1 } },
+        .{ .tag = .arg, .loc = .{ .start = 1, .end = 6 } },
     });
 }
 
 test "=> foo" {
     try testTokenize("=> foo xx\nbar", &.{
-        .{ .tag = .link, .loc = .{
-            .start = 0,
-            .end = 2,
-        } },
-        .{ .tag = .arg, .loc = .{
-            .start = 3,
-            .end = 6,
-        } },
-        .{ .tag = .arg, .loc = .{
-            .start = 7,
-            .end = 9,
-        } },
-        .{ .tag = .text, .loc = .{
-            .start = 10,
-            .end = 13,
-        } },
+        .{ .tag = .link, .loc = .{ .start = 0, .end = 2 } },
+        .{ .tag = .arg, .loc = .{ .start = 3, .end = 6 } },
+        .{ .tag = .arg, .loc = .{ .start = 7, .end = 9 } },
+        .{ .tag = .text, .loc = .{ .start = 10, .end = 13 } },
     });
 }
 test "#Hello" {
     try testTokenize("#Hello", &.{
-        .{ .tag = .head, .loc = .{
-            .start = 0,
-            .end = 1,
-        } },
-        .{ .tag = .arg, .loc = .{
-            .start = 1,
-            .end = 6,
-        } },
+        .{ .tag = .head, .loc = .{ .start = 0, .end = 1 } },
+        .{ .tag = .arg, .loc = .{ .start = 1, .end = 6 } },
     });
 }
 test "##Hello" {
     try testTokenize("##Hello", &.{
-        .{ .tag = .head, .loc = .{
-            .start = 0,
-            .end = 2,
-        } },
-        .{ .tag = .arg, .loc = .{
-            .start = 2,
-            .end = 7,
-        } },
+        .{ .tag = .head, .loc = .{ .start = 0, .end = 2 } },
+        .{ .tag = .arg, .loc = .{ .start = 2, .end = 7 } },
     });
 }
 test "###Hello" {
     try testTokenize("###Hello", &.{
-        .{ .tag = .head, .loc = .{
-            .start = 0,
-            .end = 3,
-        } },
-        .{ .tag = .arg, .loc = .{
-            .start = 3,
-            .end = 8,
-        } },
+        .{ .tag = .head, .loc = .{ .start = 0, .end = 3 } },
+        .{ .tag = .arg, .loc = .{ .start = 3, .end = 8 } },
     });
 }
 test "# Hello" {
     try testTokenize("# Hello", &.{
-        .{ .tag = .head, .loc = .{
-            .start = 0,
-            .end = 1,
-        } },
-        .{ .tag = .arg, .loc = .{
-            .start = 2,
-            .end = 7,
-        } },
+        .{ .tag = .head, .loc = .{ .start = 0, .end = 1 } },
+        .{ .tag = .arg, .loc = .{ .start = 2, .end = 7 } },
     });
 }
 
 test "```\nfoo\n```" {
     try testTokenize("```arg\nfoo\n```", &.{
-        .{ .tag = .preformat_toggle, .loc = .{
-            .start = 0,
-            .end = 3,
-        } },
-        .{ .tag = .arg, .loc = .{
-            .start = 3,
-            .end = 6,
-        } },
-        .{ .tag = .text, .loc = .{
-            .start = 7,
-            .end = 10,
-        } },
-        .{ .tag = .preformat_toggle, .loc = .{
-            .start = 11,
-            .end = 14,
-        } },
+        .{ .tag = .preformat_toggle, .loc = .{ .start = 0, .end = 3 } },
+        .{ .tag = .arg, .loc = .{ .start = 3, .end = 6 } },
+        .{ .tag = .text, .loc = .{ .start = 7, .end = 10 } },
+        .{ .tag = .preformat_toggle, .loc = .{ .start = 11, .end = 14 } },
     });
 }
+
+test "* item" {
+    try testTokenize("* item", &.{
+        .{ .tag = .list_item, .loc = .{ .start = 0, .end = 2 } },
+        .{ .tag = .arg, .loc = .{ .start = 2, .end = 6 } },
+    });
+}
+test "*text" {
+    try testTokenize("*text", &.{
+        .{ .tag = .text, .loc = .{ .start = 0, .end = 5 } },
+    });
+}
+
 fn testTokenize(source: [:0]const u8, expected_token_tags: []const Token) !void {
     var tokenizer = Tokenizer.init(source);
     for (expected_token_tags) |expected_token_tag| {
