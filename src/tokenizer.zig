@@ -56,7 +56,10 @@ pub const Tokenizer = struct {
 
     pub const State = enum {
         new_line,
-        arg,
+        arg, // argument ends with CRLF
+        ws_arg, // white space separated argument ends with SP or CRLF
+        eat_ws2, // eat_ws2 => ws_arg => eat_ws1 => arg
+        eat_ws1,
         bt1, // `
         bt2, // ``
         ln1, // =
@@ -82,13 +85,10 @@ pub const Tokenizer = struct {
             .buffer = buffer,
             .index = src_start,
             .state = .new_line,
-            //.preformat_toggle_mode = false,
-            //.new_line = true,
         };
     }
 
     pub fn next(self: *Tokenizer) Token {
-        //var state: State = .start;
         var result = Token{
             .tag = .eof,
             .loc = .{
@@ -108,13 +108,15 @@ pub const Tokenizer = struct {
                 } else {
                     result.tag =
                         switch (self.state) {
-                        .new_line, .pf_new_line => .eof,
+                        .new_line, .pf_new_line, .eat_ws2, .eat_ws1 => .eof,
                         .bt1, .bt2, .pf_bt1, .pf_bt2, .ln1, .li1, .text, .pf_text => .text,
                         .h1, .h2 => .head,
-                        .arg, .pf_arg => .arg,
+                        .arg, .ws_arg, .pf_arg => .arg,
                     };
                     self.state = .new_line; // the next read should get eof
                     result.loc.end = self.index;
+                    // if the payload is empty we return eof
+                    if (result.loc.start == result.loc.end) result.tag = .eof;
                 }
                 return result;
             }
@@ -154,6 +156,45 @@ pub const Tokenizer = struct {
                         break;
                     },
                     else => {},
+                },
+                .ws_arg => switch (c) {
+                    '\n' => {
+                        result.tag = .arg;
+                        self.state = .new_line;
+                        exclude_char = true;
+                        break;
+                    },
+                    ' ' => {
+                        result.tag = .arg;
+                        self.state = .arg;
+                        exclude_char = true;
+                        break;
+                    },
+                    else => {},
+                },
+                .eat_ws2 => switch (c) {
+                    '\n' => {
+                        self.state = .new_line;
+                        result.loc.start = self.index + 1;
+                    },
+                    ' ' => {},
+                    else => {
+                        self.state = .ws_arg;
+                        result.loc.start = self.index;
+                        self.index -= 1; // reread char;
+                    },
+                },
+                .eat_ws1 => switch (c) {
+                    '\n' => {
+                        self.state = .new_line;
+                        result.loc.start = self.index + 1;
+                    },
+                    ' ' => {},
+                    else => {
+                        self.state = .arg;
+                        result.loc.start = self.index;
+                        self.index -= 1; // reread char;
+                    },
                 },
                 .bt1 => switch (c) {
                     '`' => {
@@ -222,7 +263,7 @@ pub const Tokenizer = struct {
                 .ln1 => switch (c) {
                     '>' => {
                         result.tag = .link;
-                        self.state = .arg;
+                        self.state = .eat_ws2;
                         break;
                     },
                     '\n' => {
@@ -391,12 +432,18 @@ test ">Quote" {
     });
 }
 
-test "=> foo" {
-    try testTokenize("=> foo xx\nbar", &.{
+test "=>foo bar" {
+    try testTokenize("=>foo bar", &.{
+        .{ .tag = .link, .loc = .{ .start = 0, .end = 2 } },
+        .{ .tag = .arg, .loc = .{ .start = 2, .end = 5 } },
+        .{ .tag = .arg, .loc = .{ .start = 6, .end = 9 } },
+    });
+}
+test "=> foo bar" {
+    try testTokenize("=> foo bar", &.{
         .{ .tag = .link, .loc = .{ .start = 0, .end = 2 } },
         .{ .tag = .arg, .loc = .{ .start = 3, .end = 6 } },
-        .{ .tag = .arg, .loc = .{ .start = 7, .end = 9 } },
-        .{ .tag = .text, .loc = .{ .start = 10, .end = 13 } },
+        .{ .tag = .arg, .loc = .{ .start = 7, .end = 10 } },
     });
 }
 test "#Hello" {
@@ -420,7 +467,7 @@ test "###Hello" {
 test "# Hello" {
     try testTokenize("# Hello", &.{
         .{ .tag = .head, .loc = .{ .start = 0, .end = 1 } },
-        .{ .tag = .arg, .loc = .{ .start = 2, .end = 7 } },
+        .{ .tag = .arg, .loc = .{ .start = 1, .end = 7 } },
     });
 }
 
